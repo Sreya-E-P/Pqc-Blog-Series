@@ -50,10 +50,18 @@ def probe(host, port=443, timeout=20, offer=OFFER):
     except subprocess.TimeoutExpired:
         return dict(host=host, verdict='FAILED', group='-', detail='timeout')
     text = (r.stdout + r.stderr).decode(errors='replace')
-    g = re.search(r'(?:Negotiated TLS1\.3 group|Peer Temp Key):\s*([^\s,]+)', text)
+    g = re.search(r'Negotiated TLS1\.3 group:\s*([^\s,]+)', text)
+    if g:
+        group_name = g.group(1)
+    else:
+        t = re.search(r'Peer Temp Key:\s*([^,\n]+)(?:,\s*([^,\n]+))?', text)
+        group_name = None
+        if t:
+            first, second = t.group(1).strip(), (t.group(2) or '').strip()
+            group_name = second if first in ('ECDH', 'DH') and second else first
     proto = re.search(r'Protocol version:\s*(\S+)', text)
-    if g and proto and proto.group(1) == 'TLSv1.3':
-        group = g.group(1)
+    if group_name and proto and proto.group(1) == 'TLSv1.3':
+        group = group_name
         verdict = 'PQ' if 'MLKEM' in group.upper() or 'KYBER' in group.upper() else 'CLASSICAL'
         return dict(host=host, verdict=verdict, group=group, detail=proto.group(1))
     lines = [l.strip() for l in text.splitlines() if l.strip()]
