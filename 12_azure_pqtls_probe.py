@@ -2,8 +2,8 @@
 """
 Lab 12 (Azure series, Post 1) - Which of MY Azure endpoints really negotiate post-quantum TLS?
 
-It connects to each host with OpenSSL (>= 3.5), offers  X25519MLKEM768  first and  X25519  as
-a fallback, and records which key-exchange group the SERVER actually chose.
+It connects to each host with OpenSSL (>= 3.5), offers  X25519MLKEM768  first and common classical groups
+(X25519, P-256, P-384) as fallbacks, and records which key-exchange group the SERVER actually chose.
 
   PQ         -> the server picked a hybrid ML-KEM group (harvest-now-decrypt-later protected)
   CLASSICAL  -> the server fell back to X25519 / P-256 / P-384 (quantum-vulnerable key exchange)
@@ -37,12 +37,14 @@ import subprocess
 import sys
 
 OPENSSL = os.environ.get('OPENSSL', 'openssl')
-OFFER = 'X25519MLKEM768:X25519'          # PQ hybrid preferred, classical as fallback
+# PQ hybrid preferred; then every common classical group, so a server that dislikes X25519
+# (some Microsoft front ends reset the connection) can still answer with P-256 / P-384.
+OFFER = 'X25519MLKEM768:X25519:secp256r1:secp384r1'
 
 
-def probe(host, port=443, timeout=20):
+def probe(host, port=443, timeout=20, offer=OFFER):
     cmd = [OPENSSL, 's_client', '-connect', f'{host}:{port}', '-servername', host,
-           '-tls1_3', '-groups', OFFER, '-brief']
+           '-tls1_3', '-groups', offer, '-brief']
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -54,8 +56,9 @@ def probe(host, port=443, timeout=20):
         group = g.group(1)
         verdict = 'PQ' if 'MLKEM' in group.upper() or 'KYBER' in group.upper() else 'CLASSICAL'
         return dict(host=host, verdict=verdict, group=group, detail=proto.group(1))
-    err = next((l.strip() for l in text.splitlines()
-                if any(k in l.lower() for k in ('error', 'fail', 'alert', 'refused', 'unknown'))), 'no TLS 1.3 handshake')
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    err = next((l for l in lines if any(k in l.lower() for k in ('error', 'fail', 'alert', 'refused', 'unknown', 'reset', 'unreachable'))),
+               ' | '.join(lines[-2:]) if lines else 'no output at all')
     return dict(host=host, verdict='FAILED', group='-', detail=err[:90])
 
 
@@ -63,6 +66,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('hosts', nargs='*')
     ap.add_argument('--file')
+    ap.add_argument('--offer', default=OFFER, help='groups to offer, e.g. X25519 to test without ML-KEM')
     ap.add_argument('--control', default='www.cloudflare.com',
                     help='a host you expect to support hybrid ML-KEM (checks YOUR client)')
     a = ap.parse_args()
@@ -77,7 +81,7 @@ def main():
         sys.exit('give hostnames or --file hosts.txt')
 
     ver = subprocess.run([OPENSSL, 'version'], capture_output=True).stdout.decode().strip()
-    print(f'client: {ver}\nclient offers: {OFFER}\n')
+    print(f'client: {ver}\nclient offers: {a.offer}\n')
 
     c = probe(a.control)
     if c['verdict'] != 'PQ':
@@ -86,7 +90,7 @@ def main():
                  'Fix that first; Azure results would be meaningless.')
     print(f'self-check OK: control {a.control} negotiated {c["group"]}\n')
 
-    rows = [probe(h) for h in hosts]
+    rows = [probe(h, offer=a.offer) for h in hosts]
     print(f'{"host":58s} {"verdict":10s} {"group":16s} detail')
     for r in rows:
         print(f'{r["host"][:58]:58s} {r["verdict"]:10s} {r["group"]:16s} {r["detail"]}')
